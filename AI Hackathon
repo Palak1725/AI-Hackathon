@@ -1,0 +1,85 @@
+from flask import Flask, request, jsonify
+from twilio.twiml.voice_response import VoiceResponse
+import openai
+from concurrent.futures import ThreadPoolExecutor
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Configuration
+openai.api_key = "YOUR_OPENAI_API_KEY"
+TWILIO_PHONE_NUMBER = "YOUR_TWILIO_PHONE_NUMBER"
+executor = ThreadPoolExecutor(max_workers=10)
+
+# Function to generate a response using OpenAI GPT
+def generate_response(user_input, conversation_history):
+    prompt = (
+        "You are a polite and persuasive sales agent engaging with a customer. "
+        "Your goal is to understand their needs and close the sale. Respond intelligently:\n\n"
+        + "\n".join(conversation_history)
+        + f"\nCustomer: {user_input}\nAI:"
+    )
+    response = openai.Completion.create(
+        engine="gpt-4",
+        prompt=prompt,
+        max_tokens=200,
+        stop=["Customer:", "AI:"]
+    )
+    return response.choices[0].text.strip()
+
+# Endpoint to handle conversation
+@app.route('/conversation', methods=['POST'])
+def conversation():
+    data = request.json
+    user_input = data['text']
+    history = data.get('history', [])
+
+    # Get AI-generated response
+    ai_response = generate_response(user_input, history)
+    return jsonify({"response": ai_response})
+
+# Endpoint for Twilio voice interactions
+@app.route('/voice', methods=['POST'])
+def voice():
+    user_speech = request.form.get('SpeechResult', '')
+    history = request.form.get('history', '').split('|')  # Use '|' to separate turns
+
+    # Generate AI response
+    ai_response = generate_response(user_speech, history)
+    updated_history = history + [f"Customer: {user_speech}", f"AI: {ai_response}"]
+
+    # Prepare Twilio VoiceResponse
+    response = VoiceResponse()
+    response.say(ai_response)  # Text-to-Speech with Twilio
+    response.listen(action="/voice", finish_on_key="#")  # Listen for next input
+
+    return str(response)
+
+# Endpoint to initiate bulk calls
+@app.route('/bulk_call', methods=['POST'])
+def bulk_call():
+    from twilio.rest import Client
+    client = Client("YOUR_TWILIO_ACCOUNT_SID", "YOUR_TWILIO_AUTH_TOKEN")
+
+    customers = request.json['customers']
+    results = {}
+
+    # Function to start a call
+    def initiate_call(phone):
+        call = client.calls.create(
+            to=phone,
+            from_=TWILIO_PHONE_NUMBER,
+            url="YOUR_FLASK_SERVER_URL/voice"  # Twilio will send responses here
+        )
+        return call.sid
+
+    # Handle multiple calls using ThreadPoolExecutor
+    for customer in customers:
+        future = executor.submit(initiate_call, customer['phone'])
+        results[customer['phone']] = future.result()
+
+    return jsonify({"results": results})
+
+# Run the Flask app
+if __name__ == "__main__":
+    app.run(debug=True)
